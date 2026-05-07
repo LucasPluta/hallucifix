@@ -1,0 +1,22 @@
+{
+  "test_path": "tests/",
+  "project_root": ".",
+  "max_iterations": 5,
+  "model": "gpt-4o",
+  "timeout": 120,
+  "pytest_args": ["-x"],
+  "processes": [
+    {
+      "name": "api-server",
+      "pid": null,
+      "debugpy_port": 5678,
+      "log_file": "/tmp/api-server.log"
+    },
+    {
+      "name": "worker",
+      "pid": null,
+      "debugpy_port": 5679,
+      "log_file": "/tmp/worker.log"
+    }
+  ]
+}
