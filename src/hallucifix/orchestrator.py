@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from .attacher import AttachedProcess, ProcessTarget, attach_via_dap
-from .fixer import AIFixer, FixAttempt, FixSession
+from .fixer import AIFixer, FixAttempt, FixSession, LLMConnectionError
 from .logs import LogCollector
 from .runner import TestResult, run_pytest
 
@@ -119,6 +119,21 @@ class Orchestrator:
 
             print(f"[hallucifix] Test FAILED ({test_result.failed} failures)")
 
+            # Record the test result on the previous attempt so the LLM sees what happened
+            if attempts and not attempts[-1].success:
+                attempts[-1].test_result = test_result
+
+            # If the previous iteration applied a fix that didn't work, show it
+            if attempts and not attempts[-1].success:
+                last = attempts[-1]
+                print(f"[hallucifix]   Previous fix (iteration {last.iteration}) did NOT resolve the failure:")
+                print(f"[hallucifix]   File: {last.file_path}")
+                print(f"[hallucifix]   Analysis was: {last.analysis}")
+                print(f"[hallucifix]   Diff that failed:")
+                for line in last.patch_diff.split("\n"):
+                    print(f"[hallucifix]     {line}")
+                print()
+
             # Collect all context
             process_logs = self.log_collector.get_combined_log_text()
 
@@ -128,11 +143,22 @@ class Orchestrator:
                 print(f"[hallucifix]   Error: {failure.error_type}: {failure.error_message}")
 
                 # Ask AI for a fix
-                fix_suggestion = self.fixer.analyze_and_fix(
-                    failure=failure,
-                    process_logs=process_logs,
-                    previous_attempts=attempts,
-                )
+                try:
+                    fix_suggestion = self.fixer.analyze_and_fix(
+                        failure=failure,
+                        process_logs=process_logs,
+                        previous_attempts=attempts,
+                    )
+                except LLMConnectionError as e:
+                    print(f"[hallucifix] FATAL: {e}")
+                    print("[hallucifix] Cannot reach AI provider. Aborting.")
+                    return SessionResult(
+                        success=False,
+                        iterations=iteration,
+                        fix_attempts=attempts,
+                        final_test_result=test_result,
+                        process_logs=self.log_collector.get_combined_log_text(),
+                    )
 
                 if fix_suggestion is None:
                     print("[hallucifix]   AI could not produce a fix")
@@ -152,8 +178,10 @@ class Orchestrator:
                 attempts.append(attempt)
 
                 print(f"[hallucifix]   Fix applied. Diff:")
-                for line in attempt.patch_diff.split("\n")[:20]:
+                print(f"[hallucifix]   {'─' * 50}")
+                for line in attempt.patch_diff.split("\n"):
                     print(f"[hallucifix]     {line}")
+                print(f"[hallucifix]   {'─' * 50}")
 
                 # Only fix one failure per iteration, then re-run
                 break

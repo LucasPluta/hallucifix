@@ -14,6 +14,10 @@ from typing import Any
 from .runner import TestFailure, TestResult
 
 
+class LLMConnectionError(Exception):
+    """Raised when the LLM provider cannot be reached or rejects auth."""
+
+
 @dataclass
 class FixAttempt:
     """A single attempt to fix a failure."""
@@ -44,6 +48,7 @@ You are an expert Python debugging assistant. You are given:
 1. A failing test with its full traceback
 2. Logs from two running processes that the test interacts with
 3. The source code of the file where the failure occurred
+4. Previous fix attempts that FAILED (if any)
 
 Your job is to analyze the failure and produce a MINIMAL fix to make the test pass.
 
@@ -52,6 +57,8 @@ Rules:
 - Make the smallest change possible
 - Do not add unnecessary comments or docstrings
 - Do not refactor unrelated code
+- NEVER repeat a previous fix attempt. If a fix was already tried and failed, you MUST try a DIFFERENT approach
+- Study the previous attempts carefully to understand why they failed before proposing your fix
 - Return your fix as a JSON object with the exact format specified
 """
 
@@ -127,10 +134,18 @@ class AIFixer:
         if previous_attempts:
             parts = []
             for att in previous_attempts:
+                error_info = ""
+                if att.test_result and not att.test_result.passed:
+                    error_info = (
+                        f"\nError after this fix was applied:\n"
+                        f"{att.test_result.raw_output[-1000:]}"
+                    )
                 parts.append(
-                    f"Attempt {att.iteration}: {att.analysis}\n"
-                    f"Diff:\n{att.patch_diff}\n"
-                    f"Result: {'passed' if att.success else 'still failing'}"
+                    f"--- FAILED Attempt {att.iteration} (DO NOT REPEAT) ---\n"
+                    f"Analysis was: {att.analysis}\n"
+                    f"Diff applied:\n{att.patch_diff}\n"
+                    f"Result: {'passed' if att.success else 'STILL FAILING - do not try this again'}"
+                    f"{error_info}"
                 )
             prev_text = "\n\n".join(parts)
         else:
@@ -231,6 +246,13 @@ class AIFixer:
 
     def _call_llm(self, user_prompt: str) -> str | None:
         """Call the LLM API (OpenAI-compatible)."""
+        if not self.api_key:
+            raise LLMConnectionError(
+                "No API key configured. Set OPENAI_API_KEY or pass --api-key.\n"
+                "For GitHub Copilot: export OPENAI_API_KEY='ghp_yourToken' "
+                "and OPENAI_BASE_URL='https://models.inference.ai.azure.com'"
+            )
+
         try:
             import httpx
         except ImportError:
@@ -255,15 +277,36 @@ class AIFixer:
         try:
             with httpx.Client(timeout=60.0) as client:
                 resp = client.post(url, json=payload, headers=headers)
+                if resp.status_code in (401, 403):
+                    raise LLMConnectionError(
+                        f"Authentication failed (HTTP {resp.status_code}). "
+                        f"Check your API key and base URL.\nResponse: {resp.text[:200]}"
+                    )
+                if resp.status_code == 404:
+                    raise LLMConnectionError(
+                        f"Model endpoint not found (HTTP 404). "
+                        f"Check --base-url and --model.\nURL: {url}"
+                    )
                 resp.raise_for_status()
                 data = resp.json()
                 return data["choices"][0]["message"]["content"]
+        except LLMConnectionError:
+            raise
+        except httpx.ConnectError as e:
+            raise LLMConnectionError(
+                f"Cannot connect to LLM provider at {url}: {e}"
+            ) from e
+        except httpx.TimeoutException as e:
+            raise LLMConnectionError(
+                f"Timeout connecting to LLM provider at {url}: {e}"
+            ) from e
         except Exception as e:
             print(f"[hallucifix] LLM call failed: {e}")
             return None
 
     def _call_llm_urllib(self, user_prompt: str) -> str | None:
         """Fallback LLM call using urllib (no extra deps)."""
+        import urllib.error
         import urllib.request
 
         headers = {
@@ -286,6 +329,23 @@ class AIFixer:
             with urllib.request.urlopen(req, timeout=60) as resp:
                 data = json.loads(resp.read())
                 return data["choices"][0]["message"]["content"]
+        except urllib.error.HTTPError as e:
+            if e.code in (401, 403):
+                raise LLMConnectionError(
+                    f"Authentication failed (HTTP {e.code}). "
+                    f"Check your API key and base URL."
+                ) from e
+            if e.code == 404:
+                raise LLMConnectionError(
+                    f"Model endpoint not found (HTTP 404). "
+                    f"Check --base-url and --model.\nURL: {url}"
+                ) from e
+            print(f"[hallucifix] LLM call failed: {e}")
+            return None
+        except urllib.error.URLError as e:
+            raise LLMConnectionError(
+                f"Cannot connect to LLM provider at {url}: {e.reason}"
+            ) from e
         except Exception as e:
             print(f"[hallucifix] LLM call failed: {e}")
             return None

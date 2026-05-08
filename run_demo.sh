@@ -123,8 +123,12 @@ else
 
     if [[ -z "${OPENAI_API_KEY:-}" ]]; then
         echo -e "${YELLOW}WARNING: OPENAI_API_KEY is not set.${NC}"
-        echo -e "  Set it to enable AI-powered fixing:"
-        echo -e "  export OPENAI_API_KEY='sk-...'"
+        echo -e "  Option 1 (GitHub Copilot): use a GitHub token with GitHub Models"
+        echo -e "    export OPENAI_API_KEY='ghp_yourGitHubToken'"
+        echo -e "    export OPENAI_BASE_URL='https://models.inference.ai.azure.com'"
+        echo ""
+        echo -e "  Option 2 (OpenAI direct):"
+        echo -e "    export OPENAI_API_KEY='sk-...'"
         echo ""
         echo -e "  Running test to show failures (fix loop will fail without API key):"
         echo ""
@@ -133,7 +137,7 @@ else
     hallucifix "$PROJECT_ROOT/demo/test_integration.py" \
         -p "api-server:5678:$LOG_DIR/api-server.log" \
         -p "worker:5679:$LOG_DIR/worker.log" \
-        --max-iterations 5 \
+        --max-iterations 50 \
         --project-root "$PROJECT_ROOT" \
         --model "${HALLUCIFIX_MODEL:-gpt-4o}"
 

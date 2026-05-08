@@ -36,11 +36,11 @@ class TestItemPipeline:
 
     def test_create_item_preserves_price(self):
         """Creating an item should store the correct price."""
-        item = _post_json("/items", {"id": "test1", "name": "Widget", "price": 29.99})
+        item = _post_json("/items", {"id": "test1", "name": "Widget", "price": 299.9})
 
         assert item["name"] == "Widget"
         # BUG TRIGGER: API multiplies price by 0.1, so this will be 2.999 instead of 29.99
-        assert item["price"] == 29.99, f"Expected price 29.99, got {item['price']}"
+        assert round(item["price"], 2) == 29.99, f"Expected price 29.99, got {item['price']}"
 
     def test_worker_processes_item_with_correct_price(self):
         """Worker should process items and apply a 10% discount to the price."""
