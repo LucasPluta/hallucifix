@@ -1,6 +1,7 @@
-"""Demo math server – provides a /multiply endpoint.
+"""Demo 1 server: multiplication service (port 9100).
 
-This process is correct; the bug lives in the worker.
+Provides /multiply?a=X&b=Y → {"result": X*Y}
+This server is correct — the bug is in the worker.
 """
 
 import json
@@ -9,7 +10,7 @@ import sys
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from urllib.parse import parse_qs, urlparse
 
-LOG_FILE = "/tmp/hallucifix_demo_server.log"
+LOG_FILE = "/tmp/hallucifix_demo1_server.log"
 
 logging.basicConfig(
     filename=LOG_FILE,
@@ -18,16 +19,6 @@ logging.basicConfig(
     format="%(asctime)s %(levelname)s %(message)s",
 )
 log = logging.getLogger("server")
-
-# Optional debugpy – ignored if not installed / port unavailable
-try:
-    import os
-    if os.environ.get("ENABLE_DEBUGPY"):
-        import debugpy
-        debugpy.listen(("127.0.0.1", 5678))
-        log.info("debugpy listening on 5678")
-except Exception:
-    pass
 
 
 class Handler(BaseHTTPRequestHandler):

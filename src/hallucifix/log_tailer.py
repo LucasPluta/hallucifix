@@ -28,6 +28,9 @@ class LogTailer:
         if not self.path.exists():
             return ""
         size = self.path.stat().st_size
+        if size < self._offset:
+            # File was truncated (e.g. reopened with mode="w") – read from start
+            self._offset = 0
         if size <= self._offset:
             return ""
         with self.path.open("r", errors="replace") as fh:
