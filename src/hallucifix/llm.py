@@ -121,3 +121,46 @@ def request_fix(
         raw_response=raw,
         patch=patch,
     )
+
+
+EXPLAIN_SYSTEM_PROMPT = """\
+You are a senior software engineer writing a pull-request description.
+Given a git diff and the test output that motivated it, write a clear,
+concise Markdown explanation suitable for a PR body.
+
+Include:
+1. **Root cause** – what was wrong and why.
+2. **Fix** – what was changed and why this is correct.
+3. **Testing** – how the fix was validated.
+
+Keep it to 1–3 short paragraphs. Do not reproduce the full diff.
+"""
+
+
+def request_explanation(
+    git_patch: str,
+    test_stdout: str,
+    model: str = "gpt-4o",
+    base_url: str | None = None,
+) -> str:
+    """Ask the LLM to explain a fix for use in a PR description."""
+    if base_url:
+        client = OpenAI(base_url=base_url)
+    else:
+        client = OpenAI()
+
+    user_msg = (
+        "## Git diff\n```diff\n" + git_patch + "\n```\n\n"
+        "## Test output\n```\n" + test_stdout + "\n```"
+    )
+
+    log.info("Requesting fix explanation from %s", model)
+    response = client.chat.completions.create(
+        model=model,
+        messages=[
+            {"role": "system", "content": EXPLAIN_SYSTEM_PROMPT},
+            {"role": "user", "content": user_msg},
+        ],
+        temperature=0.3,
+    )
+    return response.choices[0].message.content or ""

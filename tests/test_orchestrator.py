@@ -46,15 +46,23 @@ def test_orchestrator_fixes_bug(tmp_path):
         ],
     })
 
-    mock_msg = MagicMock()
-    mock_msg.content = fix_payload
-    mock_choice = MagicMock()
-    mock_choice.message = mock_msg
-    mock_response = MagicMock()
-    mock_response.choices = [mock_choice]
+    # First call → fix JSON, second call → explanation text
+    fix_msg = MagicMock()
+    fix_msg.content = fix_payload
+    fix_choice = MagicMock()
+    fix_choice.message = fix_msg
+    fix_response = MagicMock()
+    fix_response.choices = [fix_choice]
+
+    explain_msg = MagicMock()
+    explain_msg.content = "The bug was using subtraction instead of addition."
+    explain_choice = MagicMock()
+    explain_choice.message = explain_msg
+    explain_response = MagicMock()
+    explain_response.choices = [explain_choice]
 
     mock_client = MagicMock()
-    mock_client.chat.completions.create.return_value = mock_response
+    mock_client.chat.completions.create.side_effect = [fix_response, explain_response]
 
     with patch("hallucifix.llm.OpenAI", return_value=mock_client):
         result = Orchestrator(config).run()
@@ -63,3 +71,8 @@ def test_orchestrator_fixes_bug(tmp_path):
     assert result.iterations == 2  # iteration 1 fails, applies fix, iteration 2 passes
     assert len(result.fix_attempts) == 1
     assert "return a + b" in buggy.read_text()
+
+    # Verify report was generated
+    assert result.report is not None
+    assert "subtraction" in result.report.markdown
+    assert result.report.patch_path is not None

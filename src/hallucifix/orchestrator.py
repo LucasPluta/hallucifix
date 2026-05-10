@@ -9,9 +9,15 @@ from pathlib import Path
 
 from hallucifix.config import HallucifixConfig
 from hallucifix.debugger import DebugSession, attach
-from hallucifix.llm import FixAttempt, build_prompt, request_fix
+from hallucifix.llm import FixAttempt, build_prompt, request_explanation, request_fix
 from hallucifix.log_tailer import LogTailer
 from hallucifix.patcher import apply_patch
+from hallucifix.report import (
+    FixReport,
+    build_report_markdown,
+    generate_git_patch,
+    write_report,
+)
 from hallucifix.test_runner import TestResult, run_pytest
 
 log = logging.getLogger(__name__)
@@ -25,6 +31,7 @@ class RunResult:
     iterations: int
     fix_attempts: list[FixAttempt] = field(default_factory=list)
     final_test: TestResult | None = None
+    report: FixReport | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -107,12 +114,14 @@ class Orchestrator:
             if result.passed:
                 log.info("Tests passed! 🎉")
                 print("\n  ✅ Tests PASSED")
-                return RunResult(
+                run_result = RunResult(
                     success=True,
                     iterations=iteration,
                     fix_attempts=self._fix_attempts,
                     final_test=result,
                 )
+                run_result.report = self._generate_report(result)
+                return run_result
 
             # Collect diagnostics ------------------------------------------------
             process_logs = self._collect_logs()
@@ -192,12 +201,15 @@ class Orchestrator:
             extra_args=self.config.extra_pytest_args,
             timeout=self.config.timeout,
         )
-        return RunResult(
+        run_result = RunResult(
             success=final.passed,
             iterations=self.config.max_fix_iterations,
             fix_attempts=self._fix_attempts,
             final_test=final,
         )
+        if final.passed:
+            run_result.report = self._generate_report(final)
+        return run_result
 
     # ------------------------------------------------------------------
     # Internal
@@ -223,3 +235,42 @@ class Orchestrator:
 
     def _collect_logs(self) -> dict[str, str]:
         return {name: tailer.collect() for name, tailer in self._tailers.items()}
+
+    def _generate_report(self, final_test: TestResult) -> FixReport:
+        """Build a git patch + markdown explanation after a successful fix."""
+        print("  Generating fix report...")
+
+        git_patch = generate_git_patch(self.config.project_root)
+
+        # Build per-iteration summaries
+        fix_summaries = []
+        for attempt in self._fix_attempts:
+            fix_summaries.append({
+                "file": attempt.patch.get("file", "unknown") if attempt.patch else "unknown",
+                "diff": attempt.patch_diff,
+            })
+
+        # Ask LLM to explain the fix
+        test_output = final_test.stdout if final_test else ""
+        try:
+            explanation = request_explanation(
+                git_patch=git_patch,
+                test_stdout=test_output,
+                model=self.config.model,
+                base_url=self.config.base_url,
+            )
+        except Exception:
+            log.warning("Failed to generate LLM explanation", exc_info=True)
+            explanation = "_Explanation could not be generated._"
+
+        markdown = build_report_markdown(
+            test_path=self.config.test_path,
+            iterations=len(self._fix_attempts),
+            model=self.config.model,
+            fix_summaries=fix_summaries,
+            explanation=explanation,
+        )
+
+        report = FixReport(git_patch=git_patch, markdown=markdown)
+        write_report(report, output_dir=self.config.project_root)
+        return report

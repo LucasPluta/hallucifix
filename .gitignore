@@ -15,6 +15,10 @@ build/
 # Logs
 *.log
 
+# Hallucifix outputs
+hallucifix.patch
+hallucifix-report.md
+
 # macOS
 .DS_Store
 

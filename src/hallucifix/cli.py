@@ -101,6 +101,11 @@ def main(argv: list[str] | None = None) -> None:
 
     if result.success:
         print(f"\n✅ Tests passed after {result.iterations} iteration(s).")
+        if result.report:
+            if result.report.patch_path:
+                print(f"   Patch: {result.report.patch_path}")
+            if result.report.markdown_path:
+                print(f"   Report: {result.report.markdown_path}")
         sys.exit(0)
     else:
         print(f"\n❌ Tests still failing after {result.iterations} iteration(s).")
