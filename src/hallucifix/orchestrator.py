@@ -1,237 +1,225 @@
-"""Orchestrator: ties together attach, log collection, test running, and AI fixing."""
+"""Main orchestration loop: test → fail → LLM fix → retest."""
 
 from __future__ import annotations
 
-import time
+import logging
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
 
-from .attacher import AttachedProcess, ProcessTarget, attach_via_dap
-from .fixer import AIFixer, FixAttempt, FixSession, LLMConnectionError
-from .logs import LogCollector
-from .runner import TestResult, run_pytest
+from hallucifix.config import HallucifixConfig
+from hallucifix.debugger import DebugSession, attach
+from hallucifix.llm import FixAttempt, build_prompt, request_fix
+from hallucifix.log_tailer import LogTailer
+from hallucifix.patcher import apply_patch
+from hallucifix.test_runner import TestResult, run_pytest
 
-
-@dataclass
-class ProcessConfig:
-    """Configuration for a process to monitor."""
-
-    name: str
-    pid: int | None = None
-    debugpy_port: int | None = None
-    log_file: str | None = None
+log = logging.getLogger(__name__)
 
 
 @dataclass
-class HallucifixConfig:
-    """Top-level configuration for a hallucifix session."""
-
-    test_path: str
-    processes: list[ProcessConfig] = field(default_factory=list)
-    project_root: str | None = None
-    max_fix_iterations: int = 5
-    model: str = "gpt-4o"
-    api_key: str | None = None
-    base_url: str | None = None
-    pytest_args: list[str] = field(default_factory=list)
-    test_timeout: float = 120.0
-
-
-@dataclass
-class SessionResult:
-    """Final result of a hallucifix session."""
+class RunResult:
+    """Outcome of a full hallucifix session."""
 
     success: bool
     iterations: int
     fix_attempts: list[FixAttempt] = field(default_factory=list)
-    final_test_result: TestResult | None = None
-    process_logs: str = ""
+    final_test: TestResult | None = None
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+_FILE_LINE_RE = re.compile(r'File "([^"]+)", line \d+')
+
+
+def _candidate_source_files(traceback_text: str, project_root: str) -> list[str]:
+    """Return relative paths of source files that might contain the bug.
+
+    First tries files mentioned in the traceback; falls back to scanning
+    *project_root* for non-test ``.py`` files.
+    """
+    root = Path(project_root).resolve()
+
+    # --- pass 1: files referenced in the traceback ---
+    candidates: list[str] = []
+    for m in _FILE_LINE_RE.finditer(traceback_text):
+        fpath = Path(m.group(1)).resolve()
+        try:
+            rel = str(fpath.relative_to(root))
+        except ValueError:
+            continue
+        if "site-packages" in str(fpath):
+            continue
+        if fpath.name.startswith("test_") or fpath.name.startswith("conftest"):
+            continue
+        if rel not in candidates:
+            candidates.append(rel)
+
+    if candidates:
+        return candidates
+
+    # --- pass 2: scan project root ---
+    for py_file in sorted(root.rglob("*.py")):
+        if "site-packages" in str(py_file):
+            continue
+        if py_file.name.startswith("test_") or py_file.name.startswith("conftest"):
+            continue
+        if py_file.name == "__init__.py":
+            continue
+        rel = str(py_file.relative_to(root))
+        if rel not in candidates:
+            candidates.append(rel)
+
+    return candidates
 
 
 class Orchestrator:
-    """Main orchestrator that runs the debug-fix loop."""
+    """Drives the test → fix → retest loop."""
 
-    def __init__(self, config: HallucifixConfig):
+    def __init__(self, config: HallucifixConfig) -> None:
         self.config = config
-        self.project_root = Path(config.project_root) if config.project_root else Path.cwd()
-        self.log_collector = LogCollector()
-        self.attached_processes: list[AttachedProcess] = []
-        self.fixer = AIFixer(
-            model=config.model,
-            api_key=config.api_key,
-            base_url=config.base_url,
-            max_iterations=config.max_fix_iterations,
-            project_root=str(self.project_root),
-        )
+        self._tailers: dict[str, LogTailer] = {}
+        self._sessions: list[DebugSession] = []
+        self._fix_attempts: list[FixAttempt] = []
 
-    def run(self) -> SessionResult:
-        """Execute the full debug-fix loop.
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
 
-        1. Attach debuggers to target processes
-        2. Start log collection
-        3. Run the test
-        4. If test fails: collect logs, send to AI, apply fix, re-run
-        5. Repeat until test passes or max iterations reached
-        """
-        print(f"[hallucifix] Starting session for test: {self.config.test_path}")
-        print(f"[hallucifix] Max fix iterations: {self.config.max_fix_iterations}")
-        print(f"[hallucifix] Model: {self.config.model}")
-
-        # Step 1: Attach to processes
-        self._attach_processes()
-
-        # Step 2: Set up log collection
-        self._setup_log_collection()
-        self.log_collector.start()
-
-        try:
-            return self._fix_loop()
-        finally:
-            self.log_collector.stop()
-            self._detach_processes()
-
-    def _fix_loop(self) -> SessionResult:
-        """The core fix loop."""
-        attempts: list[FixAttempt] = []
+    def run(self) -> RunResult:
+        self._attach_debuggers()
+        self._start_tailers()
 
         for iteration in range(1, self.config.max_fix_iterations + 1):
-            print(f"\n[hallucifix] === Iteration {iteration}/{self.config.max_fix_iterations} ===")
+            log.info("━━━ Iteration %d / %d ━━━", iteration, self.config.max_fix_iterations)
+            print(f"\n{'━' * 50}")
+            print(f"  Iteration {iteration} / {self.config.max_fix_iterations}")
+            print(f"{'━' * 50}")
 
-            # Run the test
-            print(f"[hallucifix] Running test: {self.config.test_path}")
-            test_result = run_pytest(
+            result = run_pytest(
                 self.config.test_path,
-                extra_args=self.config.pytest_args,
-                timeout=self.config.test_timeout,
-                cwd=str(self.project_root),
+                extra_args=self.config.extra_pytest_args,
+                timeout=self.config.timeout,
             )
 
-            if test_result.passed:
-                print(f"[hallucifix] Test PASSED on iteration {iteration}!")
-                return SessionResult(
+            if result.passed:
+                log.info("Tests passed! 🎉")
+                print("\n  ✅ Tests PASSED")
+                return RunResult(
                     success=True,
                     iterations=iteration,
-                    fix_attempts=attempts,
-                    final_test_result=test_result,
-                    process_logs=self.log_collector.get_combined_log_text(),
+                    fix_attempts=self._fix_attempts,
+                    final_test=result,
                 )
 
-            print(f"[hallucifix] Test FAILED ({test_result.failed} failures)")
+            # Collect diagnostics ------------------------------------------------
+            process_logs = self._collect_logs()
+            combined_output = result.stdout + "\n" + result.stderr
 
-            # Record the test result on the previous attempt so the LLM sees what happened
-            if attempts and not attempts[-1].success:
-                attempts[-1].test_result = test_result
+            # Show a short failure summary on console
+            failed_lines = [
+                l for l in result.stdout.splitlines()
+                if l.startswith("FAILED ") or "assert " in l
+            ]
+            if failed_lines:
+                print("  Tests FAILED:")
+                for fl in failed_lines[:5]:
+                    print(f"    {fl.strip()}")
 
-            # If the previous iteration applied a fix that didn't work, show it
-            if attempts and not attempts[-1].success:
-                last = attempts[-1]
-                print(f"[hallucifix]   Previous fix (iteration {last.iteration}) did NOT resolve the failure:")
-                print(f"[hallucifix]   File: {last.file_path}")
-                print(f"[hallucifix]   Analysis was: {last.analysis}")
-                print(f"[hallucifix]   Diff that failed:")
-                for line in last.patch_diff.split("\n"):
-                    print(f"[hallucifix]     {line}")
-                print()
+            candidates = _candidate_source_files(combined_output, self.config.project_root)
 
-            # Collect all context
-            process_logs = self.log_collector.get_combined_log_text()
+            if not candidates:
+                log.error("No candidate source files found to fix.")
+                print("  ❌ No candidate source files found.")
+                return RunResult(
+                    success=False,
+                    iterations=iteration,
+                    fix_attempts=self._fix_attempts,
+                    final_test=result,
+                )
 
-            # For each failure, try to fix
-            for failure in test_result.failures:
-                print(f"[hallucifix] Analyzing failure: {failure.test_name}")
-                print(f"[hallucifix]   Error: {failure.error_type}: {failure.error_message}")
+            root = Path(self.config.project_root).resolve()
+            source_files = {
+                rel: (root / rel).read_text() for rel in candidates
+            }
 
-                # Ask AI for a fix
-                try:
-                    fix_suggestion = self.fixer.analyze_and_fix(
-                        failure=failure,
-                        process_logs=process_logs,
-                        previous_attempts=attempts,
-                    )
-                except LLMConnectionError as e:
-                    print(f"[hallucifix] FATAL: {e}")
-                    print("[hallucifix] Cannot reach AI provider. Aborting.")
-                    return SessionResult(
-                        success=False,
-                        iterations=iteration,
-                        fix_attempts=attempts,
-                        final_test_result=test_result,
-                        process_logs=self.log_collector.get_combined_log_text(),
-                    )
+            print(f"  Asking LLM ({self.config.model}) for a fix...")
 
-                if fix_suggestion is None:
-                    print("[hallucifix]   AI could not produce a fix")
-                    continue
+            prompt = build_prompt(
+                traceback=combined_output,
+                test_stdout=result.stdout,
+                test_stderr=result.stderr,
+                process_logs=process_logs,
+                source_files=source_files,
+                previous_attempts=self._fix_attempts,
+            )
 
-                print(f"[hallucifix]   Analysis: {fix_suggestion['analysis']}")
-                print(f"[hallucifix]   Fixing: {fix_suggestion['file_path']}")
+            # Ask LLM for a fix ---------------------------------------------------
+            fix = request_fix(
+                prompt,
+                model=self.config.model,
+                base_url=self.config.base_url,
+                iteration=iteration,
+            )
 
-                # Apply the fix
-                attempt = self.fixer.apply_fix(fix_suggestion)
-                if attempt is None:
-                    print("[hallucifix]   Failed to apply fix (search pattern not found)")
-                    continue
+            if fix.patch is None:
+                log.error("LLM did not return a valid patch on iteration %d.", iteration)
+                print("  ⚠️  LLM did not return a valid patch – retrying...")
+                self._fix_attempts.append(fix)
+                continue
 
-                attempt.iteration = iteration
-                attempt.failure = failure
-                attempts.append(attempt)
+            # Apply the patch ------------------------------------------------------
+            try:
+                diff = apply_patch(fix.patch, project_root=self.config.project_root)
+                fix.patch_diff = diff
+                print(f"  Proposed fix (file: {fix.patch.get('file', '?')}):")
+                for line in diff.splitlines():
+                    if line.startswith("- ") or line.startswith("+ "):
+                        print(f"    {line}")
+            except (FileNotFoundError, ValueError) as exc:
+                log.error("Patch could not be applied: %s", exc)
+                print(f"  ⚠️  Patch could not be applied: {exc}")
+                self._fix_attempts.append(fix)
+                continue
 
-                print(f"[hallucifix]   Fix applied. Diff:")
-                print(f"[hallucifix]   {'─' * 50}")
-                for line in attempt.patch_diff.split("\n"):
-                    print(f"[hallucifix]     {line}")
-                print(f"[hallucifix]   {'─' * 50}")
+            self._fix_attempts.append(fix)
 
-                # Only fix one failure per iteration, then re-run
-                break
-
-        # Max iterations exhausted
-        print(f"\n[hallucifix] Max iterations ({self.config.max_fix_iterations}) reached without resolution.")
-        final_result = run_pytest(
+        # Exhausted iterations – run one last test
+        final = run_pytest(
             self.config.test_path,
-            extra_args=self.config.pytest_args,
-            timeout=self.config.test_timeout,
-            cwd=str(self.project_root),
+            extra_args=self.config.extra_pytest_args,
+            timeout=self.config.timeout,
         )
-        return SessionResult(
-            success=final_result.passed,
+        return RunResult(
+            success=final.passed,
             iterations=self.config.max_fix_iterations,
-            fix_attempts=attempts,
-            final_test_result=final_result,
-            process_logs=self.log_collector.get_combined_log_text(),
+            fix_attempts=self._fix_attempts,
+            final_test=final,
         )
 
-    def _attach_processes(self) -> None:
-        """Attach debugpy to configured processes."""
-        for proc_config in self.config.processes:
-            if proc_config.debugpy_port:
-                print(f"[hallucifix] Attaching to {proc_config.name} on port {proc_config.debugpy_port}...")
-                sock = attach_via_dap("127.0.0.1", proc_config.debugpy_port)
-                target = ProcessTarget(
-                    pid=proc_config.pid or 0,
-                    name=proc_config.name,
-                    debugpy_port=proc_config.debugpy_port,
-                    log_file=proc_config.log_file,
-                )
-                self.attached_processes.append(
-                    AttachedProcess(target=target, connected=sock is not None)
-                )
-                if sock:
-                    print(f"[hallucifix]   Connected to {proc_config.name}")
-                else:
-                    print(f"[hallucifix]   WARNING: Could not connect to {proc_config.name}")
-            else:
-                print(f"[hallucifix] Monitoring {proc_config.name} (no debugpy port, log-only)")
+    # ------------------------------------------------------------------
+    # Internal
+    # ------------------------------------------------------------------
 
-    def _setup_log_collection(self) -> None:
-        """Set up log file watching for all configured processes."""
-        for proc_config in self.config.processes:
-            if proc_config.log_file:
-                self.log_collector.add_log_file(
-                    proc_config.name, Path(proc_config.log_file)
-                )
+    def _attach_debuggers(self) -> None:
+        for proc in self.config.processes:
+            session = attach(proc)
+            if session is not None:
+                self._sessions.append(session)
 
-    def _detach_processes(self) -> None:
-        """Clean up debug connections."""
-        self.attached_processes.clear()
+    def _close_debuggers(self) -> None:
+        for session in self._sessions:
+            session.close()
+        self._sessions.clear()
+
+    def _start_tailers(self) -> None:
+        for proc in self.config.processes:
+            if proc.log_file:
+                tailer = LogTailer(proc.log_file)
+                tailer.start()
+                self._tailers[proc.name] = tailer
+
+    def _collect_logs(self) -> dict[str, str]:
+        return {name: tailer.collect() for name, tailer in self._tailers.items()}

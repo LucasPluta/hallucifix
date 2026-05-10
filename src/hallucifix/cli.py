@@ -1,159 +1,111 @@
-"""CLI entry point for hallucifix."""
+"""hallucifix CLI entry-point."""
 
 from __future__ import annotations
 
 import argparse
-import json
+import logging
 import sys
-from pathlib import Path
+import tempfile
 
-from .orchestrator import HallucifixConfig, Orchestrator, ProcessConfig
+from hallucifix.config import HallucifixConfig, ProcessConfig
+from hallucifix.orchestrator import Orchestrator
 
 
-def main() -> int:
-    parser = argparse.ArgumentParser(
+def _build_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(
         prog="hallucifix",
         description="Attach debuggers, run tests, and AI-fix failures in a loop.",
     )
-    parser.add_argument(
-        "test_path",
-        help="Path to the test file or directory to run",
-    )
-    parser.add_argument(
-        "-c", "--config",
-        help="Path to hallucifix config JSON file",
-    )
-    parser.add_argument(
-        "-p", "--process",
+    p.add_argument("test_path", help="Path to the test file / directory for pytest.")
+    p.add_argument(
+        "-p",
+        "--process",
         action="append",
+        default=[],
         metavar="NAME:PORT:LOGFILE",
-        help="Process to monitor (format: name:debugpy_port:log_file). "
-             "Port and log_file are optional. Can be specified multiple times.",
+        help="Process to monitor (may be repeated).",
     )
-    parser.add_argument(
+    p.add_argument(
+        "-c",
+        "--config",
+        default=None,
+        help="Path to a hallucifix JSON config file.",
+    )
+    p.add_argument(
         "--max-iterations",
         type=int,
         default=5,
-        help="Maximum fix iterations (default: 5)",
+        help="Maximum fix iterations (default: 5).",
     )
-    parser.add_argument(
-        "--model",
-        default="gpt-4o",
-        help="LLM model to use (default: gpt-4o)",
-    )
-    parser.add_argument(
-        "--api-key",
-        help="OpenAI API key (or set OPENAI_API_KEY env var)",
-    )
-    parser.add_argument(
-        "--base-url",
-        help="OpenAI-compatible API base URL",
-    )
-    parser.add_argument(
-        "--project-root",
-        help="Project root directory (default: cwd)",
-    )
-    parser.add_argument(
-        "--timeout",
-        type=float,
-        default=120.0,
-        help="Test timeout in seconds (default: 120)",
-    )
-    parser.add_argument(
-        "--pytest-args",
-        nargs=argparse.REMAINDER,
-        default=[],
-        help="Additional arguments to pass to pytest",
-    )
+    p.add_argument("--model", default="gpt-4o", help="LLM model name.")
+    p.add_argument("--base-url", default=None, help="OpenAI-compatible base URL.")
+    p.add_argument("--timeout", type=int, default=120, help="Pytest timeout in seconds.")
+    p.add_argument("--project-root", default=".", help="Project root directory.")
+    p.add_argument("-v", "--verbose", action="store_true", help="Verbose logging.")
 
-    args = parser.parse_args()
+    return p
 
-    # Build config
+
+def main(argv: list[str] | None = None) -> None:
+    parser = _build_parser()
+    args, extra = parser.parse_known_args(argv)
+
+    # ── Logging setup ─────────────────────────────────────────────
+    # Console: only hallucifix.* messages at INFO (clean progress output).
+    # File: everything (including openai/httpcore) at DEBUG for diagnostics.
+    root_logger = logging.getLogger()
+    root_logger.setLevel(logging.DEBUG)
+
+    # Debug log file
+    log_file = tempfile.NamedTemporaryFile(
+        prefix="hallucifix_", suffix=".log", delete=False, mode="w"
+    )
+    file_handler = logging.FileHandler(log_file.name)
+    file_handler.setLevel(logging.DEBUG)
+    file_handler.setFormatter(
+        logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s")
+    )
+    root_logger.addHandler(file_handler)
+
+    # Console handler – hallucifix.* only
+    console_handler = logging.StreamHandler(sys.stderr)
+    console_handler.setLevel(logging.INFO)
+    console_handler.setFormatter(logging.Formatter("%(message)s"))
+    console_handler.addFilter(logging.Filter("hallucifix"))
+    root_logger.addHandler(console_handler)
+
+    log = logging.getLogger("hallucifix.cli")
+    log.info("Debug log: %s", log_file.name)
+
     if args.config:
-        config = _load_config_file(args.config)
+        config = HallucifixConfig.from_file(args.config)
+        # CLI overrides
+        if args.test_path:
+            config.test_path = args.test_path
     else:
-        config = HallucifixConfig(test_path=args.test_path)
+        processes = [ProcessConfig.from_cli_string(s) for s in args.process]
+        config = HallucifixConfig(
+            test_path=args.test_path,
+            processes=processes,
+            project_root=args.project_root,
+            max_fix_iterations=args.max_iterations,
+            model=args.model,
+            timeout=args.timeout,
+            base_url=args.base_url,
+        )
 
-    # Override with CLI args
-    config.test_path = args.test_path
-    config.max_fix_iterations = args.max_iterations
-    config.model = args.model
-    config.test_timeout = args.timeout
+    config.extra_pytest_args = extra
 
-    if args.api_key:
-        config.api_key = args.api_key
-    if args.base_url:
-        config.base_url = args.base_url
-    if args.project_root:
-        config.project_root = args.project_root
-    if args.pytest_args:
-        config.pytest_args = args.pytest_args
+    orch = Orchestrator(config)
+    result = orch.run()
 
-    # Parse process definitions
-    if args.process:
-        for proc_str in args.process:
-            parts = proc_str.split(":")
-            name = parts[0]
-            port = int(parts[1]) if len(parts) > 1 and parts[1] else None
-            log_file = parts[2] if len(parts) > 2 and parts[2] else None
-            config.processes.append(ProcessConfig(
-                name=name,
-                debugpy_port=port,
-                log_file=log_file,
-            ))
-
-    # Run
-    orchestrator = Orchestrator(config)
-    result = orchestrator.run()
-
-    # Print summary
-    print("\n" + "=" * 60)
-    print("[hallucifix] SESSION SUMMARY")
-    print("=" * 60)
-    print(f"  Result: {'SUCCESS' if result.success else 'FAILED'}")
-    print(f"  Iterations: {result.iterations}")
-    print(f"  Fix attempts: {len(result.fix_attempts)}")
-
-    if result.fix_attempts:
-        print("\n  Applied fixes:")
-        for att in result.fix_attempts:
-            status = "WORKED" if att.success else "applied"
-            print(f"    [{att.iteration}] {att.file_path} - {att.analysis[:60]}... ({status})")
-
-    if not result.success and result.final_test_result:
-        print(f"\n  Final test output (last 20 lines):")
-        for line in result.final_test_result.raw_output.split("\n")[-20:]:
-            print(f"    {line}")
-
-    return 0 if result.success else 1
-
-
-def _load_config_file(path: str) -> HallucifixConfig:
-    """Load configuration from a JSON file."""
-    with open(path) as f:
-        data = json.load(f)
-
-    processes = []
-    for p in data.get("processes", []):
-        processes.append(ProcessConfig(
-            name=p["name"],
-            pid=p.get("pid"),
-            debugpy_port=p.get("debugpy_port"),
-            log_file=p.get("log_file"),
-        ))
-
-    return HallucifixConfig(
-        test_path=data.get("test_path", ""),
-        processes=processes,
-        project_root=data.get("project_root"),
-        max_fix_iterations=data.get("max_iterations", 5),
-        model=data.get("model", "gpt-4o"),
-        api_key=data.get("api_key"),
-        base_url=data.get("base_url"),
-        pytest_args=data.get("pytest_args", []),
-        test_timeout=data.get("timeout", 120.0),
-    )
+    if result.success:
+        print(f"\n✅ Tests passed after {result.iterations} iteration(s).")
+        sys.exit(0)
+    else:
+        print(f"\n❌ Tests still failing after {result.iterations} iteration(s).")
+        sys.exit(1)
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    main()

@@ -1,163 +1,199 @@
 #!/usr/bin/env bash
+# ─────────────────────────────────────────────────────────────
+#  run_demo.sh – full E2E demo of hallucifix
+#
+#  Starts a math server + a buggy worker, then lets hallucifix
+#  detect the test failure and ask an LLM to fix it.
+#
+#  Required env vars:
+#    OPENAI_API_KEY   – your OpenAI (or compatible) API key
+#
+#  Optional env vars:
+#    MODEL            – LLM model name  (default: gpt-4o)
+#    OPENAI_BASE_URL  – custom API base  (for Azure / local)
+#    MAX_ITERATIONS   – fix attempts     (default: 5)
+# ─────────────────────────────────────────────────────────────
 set -euo pipefail
 
-# ============================================================================
-# hallucifix demo runner
-#
-# Starts two buggy processes, runs hallucifix to detect and fix test failures.
-# Usage: ./run_demo.sh [--no-fix]
-#        --no-fix: just run the test without hallucifix (to see it fail)
-# ============================================================================
+cd "$(dirname "$0")"
 
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-PROJECT_ROOT="$SCRIPT_DIR"
+# ── Pre-flight checks ──────────────────────────────────────────
+if [[ -z "${OPENAI_API_KEY:-}" ]]; then
+    echo "ERROR: OPENAI_API_KEY is not set."
+    echo "  export OPENAI_API_KEY=sk-..."
+    exit 1
+fi
 
-# Colors
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-BLUE='\033[0;34m'
-NC='\033[0m'
+# ── Virtualenv & install ───────────────────────────────────────
+if [[ ! -d .venv ]]; then
+    echo "=== Creating virtual environment ==="
+    python3 -m venv .venv
+fi
+source .venv/bin/activate
+pip install -e ".[dev]" --quiet 2>/dev/null
 
-# Config
-API_PORT=8100
-API_PID=""
-WORKER_PID=""
-LOG_DIR="/tmp"
+# ── Make sure the worker has the bug (reset from git or template) ──
+# Re-write the buggy line so the demo is repeatable.
+cat > demo/worker.py <<'WORKER_EOF'
+"""Demo worker – exposes /square by calling the math server's /multiply.
+
+⚠️  THIS FILE CONTAINS AN INTENTIONAL BUG ⚠️
+The worker asks the server to compute  n × (n + 1)  instead of  n × n.
+hallucifix should detect the test failure and ask the LLM to fix it.
+"""
+
+import json
+import logging
+import sys
+import urllib.request
+from http.server import HTTPServer, BaseHTTPRequestHandler
+from urllib.parse import parse_qs, urlparse
+
+SERVER_URL = "http://127.0.0.1:9100"
+LOG_FILE = "/tmp/hallucifix_demo_worker.log"
+
+logging.basicConfig(
+    filename=LOG_FILE,
+    filemode="w",
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(message)s",
+)
+log = logging.getLogger("worker")
+
+# Optional debugpy
+try:
+    import os
+    if os.environ.get("ENABLE_DEBUGPY"):
+        import debugpy
+        debugpy.listen(("127.0.0.1", 5679))
+        log.info("debugpy listening on 5679")
+except Exception:
+    pass
+
+
+def compute_square(n: int) -> int:
+    """Return n² by delegating to the multiply server."""
+    # BUG: passes n+1 instead of n as the second factor
+    url = f"{SERVER_URL}/multiply?a={n}&b={n + 1}"
+    log.info("Requesting: %s", url)
+    resp = urllib.request.urlopen(url)
+    data = json.loads(resp.read())
+    log.info("Got result: %s", data)
+    return data["result"]
+
+
+class Handler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        parsed = urlparse(self.path)
+        params = parse_qs(parsed.query)
+
+        if parsed.path == "/square":
+            n = int(params["n"][0])
+            result = compute_square(n)
+            self._json({"result": result})
+        elif parsed.path == "/health":
+            self._json({"status": "ok"})
+        else:
+            self.send_error(404)
+
+    def _json(self, data):
+        body = json.dumps(data).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, fmt, *args):
+        log.info(fmt, *args)
+
+
+if __name__ == "__main__":
+    port = int(sys.argv[1]) if len(sys.argv) > 1 else 9101
+    server = HTTPServer(("127.0.0.1", port), Handler)
+    log.info("Worker starting on port %d", port)
+    print(f"Worker listening on 127.0.0.1:{port}", flush=True)
+    server.serve_forever()
+WORKER_EOF
+
+# ── Clean up old logs ──────────────────────────────────────────
+rm -f /tmp/hallucifix_demo_server.log /tmp/hallucifix_demo_worker.log
+touch /tmp/hallucifix_demo_server.log /tmp/hallucifix_demo_worker.log
+
+# ── Kill any leftover demo processes on the same ports ─────────
+lsof -ti:9100 2>/dev/null | xargs kill 2>/dev/null || true
+sleep 0.5
+
+# ── Suppress debugpy frozen-module warnings ────────────────────
+export PYDEVD_DISABLE_FILE_VALIDATION=1
+
+# ── Start the math server (the worker is imported directly by tests) ──
+echo "=== Starting math server (port 9100) ==="
+python demo/server.py &
+SERVER_PID=$!
 
 cleanup() {
-    echo -e "\n${YELLOW}Cleaning up...${NC}"
-    [[ -n "$API_PID" ]] && kill "$API_PID" 2>/dev/null && echo "  Stopped API server (PID $API_PID)"
-    [[ -n "$WORKER_PID" ]] && kill "$WORKER_PID" 2>/dev/null && echo "  Stopped worker (PID $WORKER_PID)"
-    rm -f "$LOG_DIR/api-server.log" "$LOG_DIR/worker.log"
+    echo ""
+    echo "=== Cleaning up background processes ==="
+    kill "$SERVER_PID" 2>/dev/null || true
+    wait "$SERVER_PID" 2>/dev/null || true
 }
 trap cleanup EXIT
 
-echo -e "${BLUE}╔══════════════════════════════════════════════════════════╗${NC}"
-echo -e "${BLUE}║            hallucifix demo                               ║${NC}"
-echo -e "${BLUE}╚══════════════════════════════════════════════════════════╝${NC}"
-echo ""
-
-# --- Check prerequisites ---
-echo -e "${YELLOW}[1/5] Checking prerequisites...${NC}"
-
-# Find python (prefer python3)
-if command -v python3 &>/dev/null; then
-    PYTHON=python3
-elif command -v python &>/dev/null; then
-    PYTHON=python
-else
-    echo -e "${RED}Error: python not found${NC}"
-    exit 1
-fi
-
-# Install hallucifix + deps if needed
-if ! $PYTHON -c "import hallucifix" 2>/dev/null; then
-    echo "  Installing hallucifix..."
-    $PYTHON -m pip install -e "$PROJECT_ROOT" --quiet --break-system-packages 2>/dev/null || \
-        $PYTHON -m pip install -e "$PROJECT_ROOT" --quiet
-fi
-
-# Ensure pytest-json-report is available
-if ! $PYTHON -c "import pytest_jsonreport" 2>/dev/null; then
-    $PYTHON -m pip install pytest-json-report --quiet --break-system-packages 2>/dev/null || \
-        $PYTHON -m pip install pytest-json-report --quiet
-fi
-
-echo -e "  ${GREEN}✓ All prerequisites met${NC}"
-
-# --- Clear old logs ---
-echo -e "${YELLOW}[2/5] Clearing old logs...${NC}"
-> "$LOG_DIR/api-server.log"
-> "$LOG_DIR/worker.log"
-echo -e "  ${GREEN}✓ Logs cleared${NC}"
-
-# --- Start API server ---
-echo -e "${YELLOW}[3/5] Starting API server on port $API_PORT...${NC}"
-$PYTHON "$PROJECT_ROOT/demo/api_server.py" "$API_PORT" &
-API_PID=$!
-sleep 1
-
-# Verify it's running
-if ! kill -0 "$API_PID" 2>/dev/null; then
-    echo -e "${RED}Error: API server failed to start${NC}"
-    exit 1
-fi
-
-# Wait for it to be ready
-for i in {1..10}; do
-    if curl -s "http://127.0.0.1:$API_PORT/health" >/dev/null 2>&1; then
+# ── Wait for the server to respond ─────────────────────────────
+echo "=== Waiting for server to become ready ==="
+for i in $(seq 1 20); do
+    if curl -sf http://127.0.0.1:9100/health >/dev/null 2>&1; then
+        echo "Server is up."
         break
     fi
-    sleep 0.5
+    if [[ $i -eq 20 ]]; then
+        echo "ERROR: server did not start in time."
+        exit 1
+    fi
+    sleep 0.3
 done
-echo -e "  ${GREEN}✓ API server running (PID $API_PID)${NC}"
 
-# --- Start worker ---
-echo -e "${YELLOW}[4/5] Starting worker process...${NC}"
-$PYTHON "$PROJECT_ROOT/demo/worker.py" &
-WORKER_PID=$!
-sleep 1
-
-if ! kill -0 "$WORKER_PID" 2>/dev/null; then
-    echo -e "${RED}Error: Worker failed to start${NC}"
-    exit 1
-fi
-echo -e "  ${GREEN}✓ Worker running (PID $WORKER_PID)${NC}"
-
-# --- Run hallucifix or just the test ---
-echo -e "${YELLOW}[5/5] Running test...${NC}"
+# ── Show what's about to happen ────────────────────────────────
+echo ""
+echo "┌──────────────────────────────────────────────────────────┐"
+echo "│                 hallucifix E2E demo                      │"
+echo "├──────────────────────────────────────────────────────────┤"
+echo "│  server.py  → correct multiply service (port 9100)      │"
+echo "│  worker.py  → BUGGY compute_square function              │"
+echo "│                                                          │"
+echo "│  Bug: worker passes  n*(n+1) instead of n*n             │"
+echo "│  hallucifix will run the tests, detect the failure,      │"
+echo "│  send logs + traceback to the LLM, apply the fix,       │"
+echo "│  and re-run until green.                                 │"
+echo "└──────────────────────────────────────────────────────────┘"
 echo ""
 
-if [[ "${1:-}" == "--no-fix" ]]; then
-    echo -e "${BLUE}Mode: test-only (no AI fixing)${NC}"
-    echo "Running: pytest demo/test_integration.py -v"
-    echo ""
-    $PYTHON -m pytest "$PROJECT_ROOT/demo/test_integration.py" -v --tb=short || true
-    echo ""
-    echo -e "${RED}Tests failed as expected (bugs are present).${NC}"
-    echo -e "Run without --no-fix to let hallucifix attempt AI-powered fixes."
-else
-    echo -e "${BLUE}Mode: hallucifix AI fix loop${NC}"
-    echo ""
+# ── Run hallucifix ─────────────────────────────────────────────
+MODEL="${MODEL:-gpt-4o}"
+MAX_ITER="${MAX_ITERATIONS:-5}"
 
-    if [[ -z "${OPENAI_API_KEY:-}" ]]; then
-        echo -e "${YELLOW}WARNING: OPENAI_API_KEY is not set.${NC}"
-        echo -e "  Option 1 (GitHub Copilot): use a GitHub token with GitHub Models"
-        echo -e "    export OPENAI_API_KEY='ghp_yourGitHubToken'"
-        echo -e "    export OPENAI_BASE_URL='https://models.inference.ai.azure.com'"
-        echo ""
-        echo -e "  Option 2 (OpenAI direct):"
-        echo -e "    export OPENAI_API_KEY='sk-...'"
-        echo ""
-        echo -e "  Running test to show failures (fix loop will fail without API key):"
-        echo ""
-    fi
-
-    hallucifix "$PROJECT_ROOT/demo/test_integration.py" \
-        -p "api-server:5678:$LOG_DIR/api-server.log" \
-        -p "worker:5679:$LOG_DIR/worker.log" \
-        --max-iterations 50 \
-        --project-root "$PROJECT_ROOT" \
-        --model "${HALLUCIFIX_MODEL:-gpt-4o}"
-
-    EXIT_CODE=$?
-    echo ""
-    if [[ $EXIT_CODE -eq 0 ]]; then
-        echo -e "${GREEN}╔══════════════════════════════════════════════════════════╗${NC}"
-        echo -e "${GREEN}║  SUCCESS: hallucifix fixed the bugs!                     ║${NC}"
-        echo -e "${GREEN}╚══════════════════════════════════════════════════════════╝${NC}"
-        echo ""
-        echo "Check the diffs:"
-        echo "  git diff demo/"
-    else
-        echo -e "${RED}╔══════════════════════════════════════════════════════════╗${NC}"
-        echo -e "${RED}║  FAILED: Could not fix within max iterations            ║${NC}"
-        echo -e "${RED}╚══════════════════════════════════════════════════════════╝${NC}"
-    fi
+EXTRA_ARGS=()
+if [[ -n "${OPENAI_BASE_URL:-}" ]]; then
+    EXTRA_ARGS+=(--base-url "$OPENAI_BASE_URL")
 fi
 
+echo "=== Running hallucifix (model=$MODEL, max_iterations=$MAX_ITER) ==="
 echo ""
-echo -e "${YELLOW}Logs available at:${NC}"
-echo "  API server: $LOG_DIR/api-server.log"
-echo "  Worker:     $LOG_DIR/worker.log"
+
+hallucifix demo/test_demo.py \
+    -p "server:5678:/tmp/hallucifix_demo_server.log" \
+    --project-root demo \
+    --max-iterations "$MAX_ITER" \
+    --model "$MODEL" \
+    "${EXTRA_ARGS[@]}" \
+    -v
+
+EXIT_CODE=$?
+
+# ── Show the fix that was applied ──────────────────────────────
+echo ""
+echo "=== Final state of demo/worker.py ==="
+cat demo/worker.py
+
+exit $EXIT_CODE

@@ -1,29 +1,26 @@
 [build-system]
-requires = ["hatchling"]
-build-backend = "hatchling.build"
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
 
 [project]
 name = "hallucifix"
 version = "0.1.0"
-description = "Attach debuggers to running processes, run tests, and AI-fix failures in a loop"
-readme = "README.md"
+description = "Attach debuggers to running Python processes, run tests, and use AI to brute-force fix failures."
 requires-python = ">=3.10"
-license = "MIT"
 dependencies = [
     "debugpy>=1.8",
-    "httpx>=0.25",
+    "openai>=1.0",
     "pytest>=7.0",
-    "pytest-json-report>=1.5",
 ]
 
 [project.optional-dependencies]
 dev = [
-    "ruff",
-    "mypy",
+    "pytest>=7.0",
+    "pytest-mock>=3.0",
 ]
 
 [project.scripts]
 hallucifix = "hallucifix.cli:main"
 
-[tool.hatch.build.targets.wheel]
-packages = ["src/hallucifix"]
+[tool.setuptools.packages.find]
+where = ["src"]

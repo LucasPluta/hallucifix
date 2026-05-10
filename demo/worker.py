@@ -1,96 +1,79 @@
-"""Demo worker process - processes items from the API with a deliberate bug."""
+"""Demo worker – exposes /square by calling the math server's /multiply.
+
+⚠️  THIS FILE CONTAINS AN INTENTIONAL BUG ⚠️
+The worker asks the server to compute  n × (n + 1)  instead of  n × n.
+hallucifix should detect the test failure and ask the LLM to fix it.
+"""
 
 import json
 import logging
 import sys
-import time
 import urllib.request
+from http.server import HTTPServer, BaseHTTPRequestHandler
+from urllib.parse import parse_qs, urlparse
 
-# Set up logging to file
+SERVER_URL = "http://127.0.0.1:9100"
+LOG_FILE = "/tmp/hallucifix_demo_worker.log"
+
 logging.basicConfig(
-    filename="/tmp/worker.log",
-    level=logging.DEBUG,
-    format="%(asctime)s [%(levelname)s] %(message)s",
+    filename=LOG_FILE,
+    filemode="w",
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(message)s",
 )
-logger = logging.getLogger("worker")
+log = logging.getLogger("worker")
 
-stdout_handler = logging.StreamHandler(sys.stdout)
-stdout_handler.setLevel(logging.DEBUG)
-logger.addHandler(stdout_handler)
-
-
-PROCESSED: list[dict] = []
-API_BASE = "http://127.0.0.1:8100"
-
-
-def fetch_items() -> list[dict]:
-    """Fetch all items from the API."""
-    try:
-        req = urllib.request.Request(f"{API_BASE}/items")
-        with urllib.request.urlopen(req, timeout=5) as resp:
-            return json.loads(resp.read())
-    except Exception as e:
-        logger.error(f"Failed to fetch items: {e}")
-        return []
-
-
-def process_item(item: dict) -> dict:
-    """Process an item - apply discount and validate.
-
-    BUG: The discount calculation uses wrong field name 'cost' instead of 'price'
-    """
-    logger.info(f"Processing item: {item['id']}")
-
-    # BUG: references 'cost' which doesn't exist, should be 'price'
-    original_price = item.get("cost", 0)
-    discount = 0.1
-    final_price = original_price * (1 - discount)
-
-    result = {
-        "id": item["id"],
-        "name": item["name"],
-        "original_price": original_price,
-        "final_price": final_price,
-        "discount_applied": discount,
-        "processed": True,
-    }
-    PROCESSED.append(result)
-    logger.info(f"Processed item {item['id']}: final_price={final_price}")
-    return result
-
-
-def get_processed() -> list[dict]:
-    """Return all processed items."""
-    return PROCESSED
-
-
-def run_worker_loop():
-    """Main worker loop - polls for new items."""
-    logger.info("Worker starting polling loop")
-    seen_ids: set[str] = set()
-
-    while True:
-        items = fetch_items()
-        for item in items:
-            if item["id"] not in seen_ids:
-                seen_ids.add(item["id"])
-                process_item(item)
-        time.sleep(1)
-
-
-def main():
-    # Start debugpy if available
-    try:
+# Optional debugpy
+try:
+    import os
+    if os.environ.get("ENABLE_DEBUGPY"):
         import debugpy
         debugpy.listen(("127.0.0.1", 5679))
-        logger.info("debugpy listening on 127.0.0.1:5679")
-    except ImportError:
-        logger.warning("debugpy not installed, skipping debug attach")
+        log.info("debugpy listening on 5679")
+except Exception:
+    pass
 
-    logger.info("Worker process starting")
-    print("Worker running", flush=True)
-    run_worker_loop()
+
+def compute_square(n: int) -> int:
+    """Return n² by delegating to the multiply server."""
+    # BUG: passes n+1 instead of n as the second factor
+    url = f"{SERVER_URL}/multiply?a={n}&b={n}"
+    log.info("Requesting: %s", url)
+    resp = urllib.request.urlopen(url)
+    data = json.loads(resp.read())
+    log.info("Got result: %s", data)
+    return data["result"]
+
+
+class Handler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        parsed = urlparse(self.path)
+        params = parse_qs(parsed.query)
+
+        if parsed.path == "/square":
+            n = int(params["n"][0])
+            result = compute_square(n)
+            self._json({"result": result})
+        elif parsed.path == "/health":
+            self._json({"status": "ok"})
+        else:
+            self.send_error(404)
+
+    def _json(self, data):
+        body = json.dumps(data).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, fmt, *args):
+        log.info(fmt, *args)
 
 
 if __name__ == "__main__":
-    main()
+    port = int(sys.argv[1]) if len(sys.argv) > 1 else 9101
+    server = HTTPServer(("127.0.0.1", port), Handler)
+    log.info("Worker starting on port %d", port)
+    print(f"Worker listening on 127.0.0.1:{port}", flush=True)
+    server.serve_forever()
