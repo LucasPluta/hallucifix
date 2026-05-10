@@ -2,7 +2,7 @@
 # ─────────────────────────────────────────────────────────────
 #  _run_demo.sh – shared E2E demo runner for hallucifix
 #
-#  Usage (not called directly — use run_demo1/2/3.sh):
+#  Usage (not called directly — use run_demo1/2/3/4.sh):
 #    ./_run_demo.sh <demo_dir> <template_file> <description>
 #
 #  Required env vars:
@@ -12,12 +12,70 @@
 #    MODEL            – LLM model name  (default: gpt-4o)
 #    OPENAI_BASE_URL  – custom API base  (for Azure / local)
 #    MAX_ITERATIONS   – fix attempts     (default: 5)
+#
+#  You can also pass --model <name> as the first argument:
+#    ./scripts/run_demo1.sh --model claude-sonnet-4-20250514
+#
+#  ── Tested model presets ──────────────────────────────────────
+#
+#  Provider    MODEL value                    OPENAI_BASE_URL
+#  ─────────  ─────────────────────────────   ────────────────────────────
+#  OpenAI     gpt-4o  (default)               (none — uses api.openai.com)
+#  OpenAI     gpt-4o-mini                     (none)
+#  OpenAI     gpt-4-turbo                     (none)
+#  OpenAI     o3-mini                         (none)
+#  Anthropic  claude-sonnet-4-20250514              https://api.anthropic.com/v1
+#  Anthropic  claude-opus-4-20250514                https://api.anthropic.com/v1
+#  Google     gemini-2.0-flash                https://generativelanguage.googleapis.com/v1beta/openai
+#  Groq       llama-3.3-70b-versatile         https://api.groq.com/openai/v1
+#  Ollama     llama3:70b (or any local)       http://localhost:11434/v1
+#  vLLM       (your model name)               http://localhost:8000/v1
+#  Azure      (your deployment name)          https://<resource>.openai.azure.com
+#
+#  Examples:
+#    MODEL=gpt-4o-mini ./scripts/run_demo1.sh
+#    MODEL=claude-sonnet-4-20250514 OPENAI_BASE_URL=https://api.anthropic.com/v1 ./scripts/run_demo2.sh
+#    ./scripts/run_demo1.sh --model o3-mini
 # ─────────────────────────────────────────────────────────────
 set -euo pipefail
 
-DEMO_DIR="$1"
-TEMPLATE="$2"
-DESCRIPTION="$3"
+# ── Parse optional --model flag before positional args ─────────
+_parse_model_flag() {
+    # Scan all args; if --model is found, set MODEL and remove it.
+    local -a remaining=()
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --model)
+                shift
+                if [[ $# -eq 0 ]]; then
+                    echo "ERROR: --model requires a value." >&2
+                    exit 1
+                fi
+                export MODEL="$1"
+                shift
+                ;;
+            --model=*)
+                export MODEL="${1#*=}"
+                shift
+                ;;
+            *)
+                remaining+=("$1")
+                shift
+                ;;
+        esac
+    done
+    set -- "${remaining[@]}"
+    # Re-export positional args for the caller
+    DEMO_DIR="${1:-}"
+    TEMPLATE="${2:-}"
+    DESCRIPTION="${3:-}"
+}
+_parse_model_flag "$@"
+
+if [[ -z "$DEMO_DIR" || -z "$TEMPLATE" || -z "$DESCRIPTION" ]]; then
+    echo "ERROR: _run_demo.sh requires 3 positional args: <demo_dir> <template> <description>" >&2
+    exit 1
+fi
 DEMO_NAME="$(basename "$DEMO_DIR")"
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"

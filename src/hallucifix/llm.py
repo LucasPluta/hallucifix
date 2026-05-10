@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from dataclasses import dataclass
 
 from openai import OpenAI
@@ -88,15 +89,30 @@ def request_fix(
     else:
         client = OpenAI()
 
-    log.info("Requesting fix from %s (iteration %d)", model, iteration)
-    response = client.chat.completions.create(
-        messages=[
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": prompt_text},
-        ],
-        temperature=0.2,
-        **kwargs,
+    est_tokens = (len(SYSTEM_PROMPT) + len(prompt_text)) // 4
+    log.info(
+        "Requesting fix from %s (iteration %d) — ~%d estimated tokens",
+        model, iteration, est_tokens,
     )
+    try:
+        response = client.chat.completions.create(
+            messages=[
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "user", "content": prompt_text},
+            ],
+            temperature=0.2,
+            **kwargs,
+        )
+    except Exception as exc:
+        msg = str(exc)
+        # Extract token limit from error message if present
+        limit_match = re.search(r"Max size:\s*([\d,]+)\s*tokens", msg)
+        limit_str = limit_match.group(1) if limit_match else "unknown"
+        log.error(
+            "LLM request failed (~%d estimated tokens, limit: %s tokens): %s",
+            est_tokens, limit_str, msg,
+        )
+        raise
     raw = response.choices[0].message.content or ""
 
     # Strip markdown fences the LLM sometimes wraps around JSON

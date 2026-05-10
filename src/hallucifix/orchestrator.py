@@ -154,8 +154,6 @@ class Orchestrator:
                 rel: (root / rel).read_text() for rel in candidates
             }
 
-            print(f"  Asking LLM ({self.config.model}) for a fix...")
-
             prompt = build_prompt(
                 traceback=combined_output,
                 test_stdout=result.stdout,
@@ -164,6 +162,9 @@ class Orchestrator:
                 source_files=source_files,
                 previous_attempts=self._fix_attempts,
             )
+
+            est_tokens = (len(prompt) + 500) // 4  # +500 for system prompt
+            print(f"  Asking LLM ({self.config.model}) for a fix... (~{est_tokens} tokens)")
 
             # Ask LLM for a fix ---------------------------------------------------
             fix = request_fix(
