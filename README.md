@@ -137,3 +137,61 @@ Any OpenAI-compatible API works:
 - Anthropic via proxy
 - Azure OpenAI
 - Local models (ollama, vLLM, etc.) via `--base-url`
+
+## Report generation & PR-ready output
+
+When hallucifix successfully fixes a failing test, it produces two artefacts in the project root:
+
+| File | Purpose |
+|------|---------|
+| `hallucifix.patch` | A `git diff HEAD` patch that can be applied with `git apply` |
+| `hallucifix-report.md` | A Markdown explanation suitable for use as a PR body |
+
+The report includes a summary (test path, model, iteration count), an LLM-generated explanation of the fix, and a per-iteration changelog with inline diffs.
+
+### Explanation quality guidelines
+
+<!--
+@hallucifix-llm-context
+The following principles govern how the explanation LLM call is constructed.
+They are critical for producing useful, accurate PR descriptions.
+Any agent or contributor modifying request_explanation(), EXPLAIN_SYSTEM_PROMPT,
+or _generate_report() MUST adhere to these rules.
+-->
+
+The LLM-generated explanation must describe **only the actual code change** and its immediate motivation. The following principles apply:
+
+1. **Scope the description to the diff.** The explanation should cover what was wrong in the original code, what was changed, and why the new code is correct. It must not speculate about unrelated concerns (git state, CI configuration, repository setup, deployment, etc.).
+
+2. **Provide source context proportional to complexity.** The edited source file(s) are passed alongside the diffs so the LLM can reference surrounding logic when explaining the root cause. Simple one-line fixes need minimal context; multi-file changes across interacting components need more.
+
+3. **Start with the directly-edited files.** Only the files that were actually patched are included as source context by default. Do not eagerly expand to the entire codebase — additional files should only be pulled in when the edited file alone does not contain enough information to explain the fix.
+
+4. **Use the applied search/replace diffs, not the git diff.** The search/replace edits are always available and precisely describe what changed. The git diff may be empty (fresh repo, unstaged changes) and should not be the primary input to the explanation call.
+
+5. **Structure: Root cause → Fix → Testing.** Every explanation should cover these three points concisely (1–3 paragraphs). It should not reproduce the full diff or large blocks of source code.
+
+### How it works internally
+
+```
+Fix succeeds
+  │
+  ├─ Read source file(s) that were patched (post-fix versions)
+  ├─ Collect per-iteration search/replace diffs
+  ├─ Send diffs + source context + test output to LLM
+  │    → LLM returns a concise PR-body explanation
+  ├─ Run `git diff HEAD` for a machine-applicable patch
+  └─ Write hallucifix.patch + hallucifix-report.md
+```
+
+### Python API access
+
+```python
+result = orchestrator.run()
+
+if result.success and result.report:
+    print(result.report.markdown)       # PR-body text
+    print(result.report.git_patch)      # git-apply-able patch
+    print(result.report.patch_path)     # absolute path to .patch file
+    print(result.report.markdown_path)  # absolute path to .md file
+```
