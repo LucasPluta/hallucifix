@@ -125,34 +125,64 @@ def request_fix(
 
 EXPLAIN_SYSTEM_PROMPT = """\
 You are a senior software engineer writing a pull-request description.
-Given a git diff and the test output that motivated it, write a clear,
-concise Markdown explanation suitable for a PR body.
+You will be given:
+  • the search/replace diffs that were applied to fix failing tests
+  • the source code of the edited file(s) (post-fix) for context
+  • the test output that confirmed the fix
+
+Use the source code to understand the surrounding logic and explain *why*
+the original code was wrong. Focus on the actual code change — do not
+speculate about git state, CI pipelines, repository setup, or anything
+not visible in the provided materials.
 
 Include:
-1. **Root cause** – what was wrong and why.
-2. **Fix** – what was changed and why this is correct.
-3. **Testing** – how the fix was validated.
+1. **Root cause** – what was wrong in the original code and why,
+   referencing the surrounding logic when it helps clarify.
+2. **Fix** – what was changed (referencing the specific edit) and why
+   the new code is correct.
+3. **Testing** – the tests that were failing now pass.
 
-Keep it to 1–3 short paragraphs. Do not reproduce the full diff.
+Keep it to 1–3 short paragraphs. Do not reproduce the full diff or
+large blocks of source code.
 """
 
 
 def request_explanation(
-    git_patch: str,
+    applied_diffs: list[dict],
     test_stdout: str,
+    source_files: dict[str, str] | None = None,
     model: str = "gpt-4o",
     base_url: str | None = None,
 ) -> str:
-    """Ask the LLM to explain a fix for use in a PR description."""
+    """Ask the LLM to explain a fix for use in a PR description.
+
+    *applied_diffs* is a list of ``{"file": ..., "diff": ...}`` dicts
+    describing the search/replace edits that were applied.
+
+    *source_files* maps relative file paths to their (post-fix) source
+    code, giving the LLM context to explain the surrounding logic.
+    """
     if base_url:
         client = OpenAI(base_url=base_url)
     else:
         client = OpenAI()
 
-    user_msg = (
-        "## Git diff\n```diff\n" + git_patch + "\n```\n\n"
-        "## Test output\n```\n" + test_stdout + "\n```"
-    )
+    diff_parts = []
+    for d in applied_diffs:
+        diff_parts.append(f"### {d['file']}\n```diff\n{d['diff']}\n```")
+    diff_section = "\n\n".join(diff_parts) if diff_parts else "_No diffs available._"
+
+    sections = ["## Applied code changes\n" + diff_section]
+
+    if source_files:
+        src_parts = []
+        for fpath, code in source_files.items():
+            src_parts.append(f"### {fpath}\n```python\n{code}\n```")
+        sections.append("## Source context\n" + "\n\n".join(src_parts))
+
+    sections.append("## Test output\n```\n" + test_stdout + "\n```")
+
+    user_msg = "\n\n".join(sections)
 
     log.info("Requesting fix explanation from %s", model)
     response = client.chat.completions.create(

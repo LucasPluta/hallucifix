@@ -250,12 +250,29 @@ class Orchestrator:
                 "diff": attempt.patch_diff,
             })
 
+        # Collect source context for edited files
+        root = Path(self.config.project_root).resolve()
+        source_files: dict[str, str] = {}
+        seen_files: set[str] = set()
+        for summary in fix_summaries:
+            rel = summary["file"]
+            if rel in seen_files or rel == "unknown":
+                continue
+            seen_files.add(rel)
+            fpath = root / rel
+            if fpath.is_file():
+                try:
+                    source_files[rel] = fpath.read_text()
+                except OSError:
+                    log.debug("Could not read source file %s", fpath)
+
         # Ask LLM to explain the fix
         test_output = final_test.stdout if final_test else ""
         try:
             explanation = request_explanation(
-                git_patch=git_patch,
+                applied_diffs=fix_summaries,
                 test_stdout=test_output,
+                source_files=source_files or None,
                 model=self.config.model,
                 base_url=self.config.base_url,
             )
