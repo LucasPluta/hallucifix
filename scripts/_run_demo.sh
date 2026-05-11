@@ -142,6 +142,14 @@ done
 MODEL="${MODEL:-gpt-4o}"
 MAX_ITER="${MAX_ITERATIONS:-5}"
 
+if [[ -n "${GEMINI_API_KEY:-}" ]]; then
+    API_PATH="Gemini (google-genai SDK)"
+elif [[ -n "${OPENAI_BASE_URL:-}" ]]; then
+    API_PATH="OpenAI-compatible (${OPENAI_BASE_URL})"
+else
+    API_PATH="OpenAI (api.openai.com)"
+fi
+
 echo ""
 echo "┌──────────────────────────────────────────────────────────┐"
 echo "│  hallucifix E2E · ${DEMO_NAME}                                │"
@@ -149,6 +157,7 @@ echo "├───────────────────────�
 printf "│  %-57s│\n" "$DESCRIPTION"
 echo "│                                                          │"
 printf "│  model: %-49s│\n" "$MODEL"
+printf "│  API:   %-49s│\n" "$API_PATH"
 printf "│  max iterations: %-40s│\n" "$MAX_ITER"
 echo "└──────────────────────────────────────────────────────────┘"
 echo ""
@@ -171,7 +180,45 @@ EXIT_CODE=$?
 
 # ── Show result ────────────────────────────────────────────────
 echo ""
-echo "=== Final state of $DEMO_DIR/worker.py ==="
+if [[ $EXIT_CODE -eq 0 ]]; then
+    echo "✅  Demo passed!"
+else
+    echo "❌  Demo failed (exit $EXIT_CODE)."
+fi
+
+echo ""
+echo "=== Artifacts ==="
+echo ""
+
+# Report markdown
+REPORT_MD="$DEMO_DIR/hallucifix_report/hallucifix_report.md"
+if [[ -f "$REPORT_MD" ]]; then
+    echo "📝 Report:  $REPORT_MD"
+else
+    echo "   (no report generated)"
+fi
+
+# Git patch
+PATCH_FILE="$DEMO_DIR/hallucifix_report/hallucifix.patch"
+if [[ -f "$PATCH_FILE" ]]; then
+    echo "🩹 Patch:   $PATCH_FILE"
+else
+    echo "   (no patch generated)"
+fi
+
+# Fixed source
+echo "📄 Source:  $DEMO_DIR/worker.py"
+
+echo ""
+echo "─── Fixed worker.py ───────────────────────────────────────"
 cat "$DEMO_DIR/worker.py"
+echo "──────────────────────────────────────────────────────────"
+
+if [[ -f "$REPORT_MD" ]]; then
+    echo ""
+    echo "─── Report ──────────────────────────────────────────────"
+    cat "$REPORT_MD"
+    echo "──────────────────────────────────────────────────────────"
+fi
 
 exit $EXIT_CODE

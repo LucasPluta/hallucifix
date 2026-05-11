@@ -2,6 +2,49 @@
 
 Attach debuggers to running Python processes, run tests, and use AI to brute-force fix failures in a loop.
 
+## Quick start
+
+```bash
+pip install -e .
+
+# Set one of these — Gemini takes priority if both are set
+export OPENAI_API_KEY="sk-..."        # OpenAI / OpenAI-compatible
+export GEMINI_API_KEY="AIza..."       # Native Gemini SDK (recommended)
+
+# Run a demo
+./scripts/run_demo1.sh                          # defaults: gpt-4o via OpenAI
+./scripts/run_demo1.sh --model gemini-2.5-flash  # uses Gemini API when GEMINI_API_KEY is set
+```
+
+### API selection
+
+| Condition | API used | Notes |
+|-----------|----------|-------|
+| `GEMINI_API_KEY` is set | **Gemini** (`google-genai` SDK) | Recommended — 1M token context, no 8K limit |
+| `OPENAI_BASE_URL` is set | **OpenAI-compatible** endpoint | Azure, Anthropic proxy, Groq, Ollama, vLLM |
+| Neither | **OpenAI** (`api.openai.com`) | Requires `OPENAI_API_KEY` |
+
+### Supported models
+
+| Provider | `--model` value | `OPENAI_BASE_URL` |
+|----------|----------------|-------------------|
+| Gemini | `gemini-2.5-flash` (fast) / `gemini-2.5-pro` (strong) | _(not needed — uses native SDK)_ |
+| OpenAI | `gpt-4o` (default) / `gpt-4o-mini` / `o3-mini` | _(none)_ |
+| Anthropic | `claude-sonnet-4-20250514` / `claude-opus-4-20250514` | `https://api.anthropic.com/v1` |
+| Groq | `llama-3.3-70b-versatile` | `https://api.groq.com/openai/v1` |
+| Ollama | `llama3:70b` (or any local) | `http://localhost:11434/v1` |
+| Azure | _(your deployment name)_ | `https://<resource>.openai.azure.com` |
+
+### Outputs
+
+A successful run produces these artifacts in the project directory:
+
+| File | Description |
+|------|-------------|
+| `hallucifix_report/hallucifix_report.md` | PR-ready explanation of root cause, fix, and test results |
+| `hallucifix_report/hallucifix.patch` | `git apply`-able patch of all changes |
+| `worker.py` (or target file) | The fixed source file, modified in-place |
+
 ## How it works
 
 ```
@@ -24,12 +67,6 @@ Attach debuggers to running Python processes, run tests, and use AI to brute-for
 │  7. Repeat up to N iterations                               │
 │                                                             │
 └─────────────────────────────────────────────────────────────┘
-```
-
-## Installation
-
-```bash
-pip install -e .
 ```
 
 ## Prerequisites
@@ -112,13 +149,6 @@ if result.success:
         print(attempt.patch_diff)
 ```
 
-## Environment Variables
-
-| Variable | Description |
-|----------|-------------|
-| `OPENAI_API_KEY` | API key for LLM calls |
-| `OPENAI_BASE_URL` | Custom API base URL (for Azure, local models, etc.) |
-
 ## How the AI fix works
 
 On each failure, hallucifix sends the LLM:
@@ -129,14 +159,6 @@ On each failure, hallucifix sends the LLM:
 - Previous fix attempts (so it doesn't repeat itself)
 
 The LLM returns a search/replace patch that hallucifix applies to the source, then re-runs the test.
-
-## Supported LLM backends
-
-Any OpenAI-compatible API works:
-- OpenAI (GPT-4o, GPT-4-turbo)
-- Anthropic via proxy
-- Azure OpenAI
-- Local models (ollama, vLLM, etc.) via `--base-url`
 
 ## Report generation & PR-ready output
 
