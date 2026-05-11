@@ -217,3 +217,15 @@ if result.success and result.report:
     print(result.report.patch_path)     # absolute path to .patch file
     print(result.report.markdown_path)  # absolute path to .md file
 ```
+
+## Known issues & notes
+
+- **debugpy warning is expected in demos.** The demo scripts pass `-p "server:5678:..."` but the demo servers don't start debugpy, so you'll see `debugpy port 127.0.0.1:5678 not reachable – skipping attach`. This is harmless — the server code is correct and doesn't need debugging. To silence it, launch the server through debugpy: `python -m debugpy --listen 5678 server.py`.
+
+- **GitHub Models has an 8K token limit.** When using `gpt-4o` via `models.inference.ai.azure.com`, prompts over ~8K tokens will get a 413 error. Use `gemini-2.5-flash` (1M context) for larger codebases, or pass `--model gpt-4o-mini` for a cheaper OpenAI option.
+
+- **LLM may return paths that include the project root.** The patcher handles this gracefully — if the LLM returns `demos/demo4/worker.py` when `project_root` is already `demos/demo4`, it strips the redundant prefix automatically instead of failing.
+
+- **Comment hints affect LLM accuracy.** If demo source files contain comments explaining where bugs are (e.g. `# BUG: should be ...`), the LLM will rely on them instead of reasoning from the test failures. Run `./scripts/strip_hints.sh` to remove all hint comments from `demos/` before benchmarking.
+
+- **Console output is intentionally terse.** Only progress-level messages (iteration status, pass/fail, fix application) print to the console. Full diffs, token estimates, raw LLM responses, and pytest commands are written to the debug log file (path printed at startup).

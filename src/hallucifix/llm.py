@@ -33,7 +33,7 @@ def _gemini_chat(
     api_key = os.environ["GEMINI_API_KEY"]
     client = genai.Client(api_key=api_key)
 
-    log.info("Using Gemini native client (model=%s)", model)
+    log.debug("Using Gemini native client (model=%s)", model)
     response = client.models.generate_content(
         model=model,
         contents=user,
@@ -117,7 +117,7 @@ def request_fix(
 ) -> FixAttempt:
     """Call the LLM and return a FixAttempt."""
     est_tokens = (len(SYSTEM_PROMPT) + len(prompt_text)) // 4
-    log.info(
+    log.debug(
         "Requesting fix from %s (iteration %d) — ~%d estimated tokens",
         model, iteration, est_tokens,
     )
@@ -231,7 +231,7 @@ def request_explanation(
 
     user_msg = "\n\n".join(sections)
 
-    log.info("Requesting fix explanation from %s", model)
+    log.debug("Requesting fix explanation from %s", model)
 
     if _use_gemini():
         return _gemini_chat(EXPLAIN_SYSTEM_PROMPT, user_msg, model, temperature=0.3)

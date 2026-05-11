@@ -100,10 +100,8 @@ class Orchestrator:
         self._start_tailers()
 
         for iteration in range(1, self.config.max_fix_iterations + 1):
-            log.info("━━━ Iteration %d / %d ━━━", iteration, self.config.max_fix_iterations)
-            print(f"\n{'━' * 50}")
-            print(f"  Iteration {iteration} / {self.config.max_fix_iterations}")
-            print(f"{'━' * 50}")
+            log.debug("━━━ Iteration %d / %d ━━━", iteration, self.config.max_fix_iterations)
+            print(f"\n━━━ Iteration {iteration} / {self.config.max_fix_iterations} ━━━")
 
             result = run_pytest(
                 self.config.test_path,
@@ -112,7 +110,7 @@ class Orchestrator:
             )
 
             if result.passed:
-                log.info("Tests passed! 🎉")
+                log.debug("Tests passed on iteration %d", iteration)
                 print("\n  ✅ Tests PASSED")
                 run_result = RunResult(
                     success=True,
@@ -163,8 +161,7 @@ class Orchestrator:
                 previous_attempts=self._fix_attempts,
             )
 
-            est_tokens = (len(prompt) + 500) // 4  # +500 for system prompt
-            print(f"  Asking LLM ({self.config.model}) for a fix... (~{est_tokens} tokens)")
+            print(f"  Asking LLM ({self.config.model}) for a fix...")
 
             # Ask LLM for a fix ---------------------------------------------------
             fix = request_fix(
@@ -184,10 +181,7 @@ class Orchestrator:
             try:
                 diff = apply_patch(fix.patch, project_root=self.config.project_root)
                 fix.patch_diff = diff
-                print(f"  Proposed fix (file: {fix.patch.get('file', '?')}):")
-                for line in diff.splitlines():
-                    if line.startswith("- ") or line.startswith("+ "):
-                        print(f"    {line}")
+                print(f"  Applied fix to {fix.patch.get('file', '?')}")
             except (FileNotFoundError, ValueError) as exc:
                 log.error("Patch could not be applied: %s", exc)
                 print(f"  ⚠️  Patch could not be applied: {exc}")

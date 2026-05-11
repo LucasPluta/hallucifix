@@ -29,7 +29,7 @@ def run_pytest(
     if extra_args:
         cmd.extend(extra_args)
 
-    log.info("Running: %s", " ".join(cmd))
+    log.debug("Running: %s", " ".join(cmd))
     try:
         proc = subprocess.run(
             cmd,

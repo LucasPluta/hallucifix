@@ -49,5 +49,5 @@ def apply_patch(patch: dict, project_root: str = ".") -> str:
 
     file_path.write_text(modified)
     diff_text = "\n".join(diff_lines)
-    log.info("Patched %s:\n%s", file_path, diff_text)
+    log.debug("Patched %s:\n%s", file_path, diff_text)
     return diff_text
