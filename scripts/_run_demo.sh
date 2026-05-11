@@ -82,11 +82,33 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 cd "$PROJECT_ROOT"
 
+# ── Resolve model early (needed for API selection) ─────────────
+MODEL="${MODEL:-gpt-4o}"
+
+# ── Detect API path from model name ────────────────────────────
+_is_gemini_model() {
+    [[ "$1" == gemini-* || "$1" == gemini_* ]]
+}
+
+if _is_gemini_model "$MODEL"; then
+    USE_GEMINI=1
+else
+    USE_GEMINI=0
+fi
+
 # ── Pre-flight checks ──────────────────────────────────────────
-if [[ -z "${OPENAI_API_KEY:-}" ]]; then
-    echo "ERROR: OPENAI_API_KEY is not set."
-    echo "  export OPENAI_API_KEY=sk-..."
-    exit 1
+if [[ $USE_GEMINI -eq 1 ]]; then
+    if [[ -z "${GEMINI_API_KEY:-}" ]]; then
+        echo "ERROR: Model '$MODEL' requires GEMINI_API_KEY."
+        echo "  export GEMINI_API_KEY=AIza..."
+        exit 1
+    fi
+else
+    if [[ -z "${OPENAI_API_KEY:-}" ]]; then
+        echo "ERROR: OPENAI_API_KEY is not set."
+        echo "  export OPENAI_API_KEY=sk-..."
+        exit 1
+    fi
 fi
 
 # ── Virtualenv & install ───────────────────────────────────────
@@ -139,10 +161,9 @@ for i in $(seq 1 20); do
 done
 
 # ── Banner ─────────────────────────────────────────────────────
-MODEL="${MODEL:-gpt-4o}"
 MAX_ITER="${MAX_ITERATIONS:-5}"
 
-if [[ -n "${GEMINI_API_KEY:-}" ]]; then
+if [[ $USE_GEMINI -eq 1 ]]; then
     API_PATH="Gemini (google-genai SDK)"
 elif [[ -n "${OPENAI_BASE_URL:-}" ]]; then
     API_PATH="OpenAI-compatible (${OPENAI_BASE_URL})"
