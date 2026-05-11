@@ -10,6 +10,7 @@ requires-python = ">=3.10"
 dependencies = [
     "debugpy>=1.8",
     "openai>=1.0",
+    "google-genai>=1.0",
     "pytest>=7.0",
 ]
 

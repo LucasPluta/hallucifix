@@ -4,12 +4,45 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 from dataclasses import dataclass
 
 from openai import OpenAI
 
 log = logging.getLogger(__name__)
+
+
+# ── Gemini support ─────────────────────────────────────────────
+
+def _use_gemini() -> bool:
+    """Return True if GEMINI_API_KEY is set in the environment."""
+    return bool(os.environ.get("GEMINI_API_KEY"))
+
+
+def _gemini_chat(
+    system: str,
+    user: str,
+    model: str,
+    temperature: float,
+) -> str:
+    """Call the Google Gemini API via the native genai SDK."""
+    from google import genai
+    from google.genai import types
+
+    api_key = os.environ["GEMINI_API_KEY"]
+    client = genai.Client(api_key=api_key)
+
+    log.info("Using Gemini native client (model=%s)", model)
+    response = client.models.generate_content(
+        model=model,
+        contents=user,
+        config=types.GenerateContentConfig(
+            system_instruction=system,
+            temperature=temperature,
+        ),
+    )
+    return response.text or ""
 
 SYSTEM_PROMPT = """\
 You are an expert Python debugger.  You will be given:
@@ -83,37 +116,40 @@ def request_fix(
     iteration: int = 1,
 ) -> FixAttempt:
     """Call the LLM and return a FixAttempt."""
-    kwargs: dict = {"model": model}
-    if base_url:
-        client = OpenAI(base_url=base_url)
-    else:
-        client = OpenAI()
-
     est_tokens = (len(SYSTEM_PROMPT) + len(prompt_text)) // 4
     log.info(
         "Requesting fix from %s (iteration %d) — ~%d estimated tokens",
         model, iteration, est_tokens,
     )
-    try:
-        response = client.chat.completions.create(
-            messages=[
-                {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user", "content": prompt_text},
-            ],
-            temperature=0.2,
-            **kwargs,
-        )
-    except Exception as exc:
-        msg = str(exc)
-        # Extract token limit from error message if present
-        limit_match = re.search(r"Max size:\s*([\d,]+)\s*tokens", msg)
-        limit_str = limit_match.group(1) if limit_match else "unknown"
-        log.error(
-            "LLM request failed (~%d estimated tokens, limit: %s tokens): %s",
-            est_tokens, limit_str, msg,
-        )
-        raise
-    raw = response.choices[0].message.content or ""
+
+    if _use_gemini():
+        raw = _gemini_chat(SYSTEM_PROMPT, prompt_text, model, temperature=0.2)
+    else:
+        kwargs: dict = {"model": model}
+        if base_url:
+            client = OpenAI(base_url=base_url)
+        else:
+            client = OpenAI()
+
+        try:
+            response = client.chat.completions.create(
+                messages=[
+                    {"role": "system", "content": SYSTEM_PROMPT},
+                    {"role": "user", "content": prompt_text},
+                ],
+                temperature=0.2,
+                **kwargs,
+            )
+        except Exception as exc:
+            msg = str(exc)
+            limit_match = re.search(r"Max size:\s*([\d,]+)\s*tokens", msg)
+            limit_str = limit_match.group(1) if limit_match else "unknown"
+            log.error(
+                "LLM request failed (~%d estimated tokens, limit: %s tokens): %s",
+                est_tokens, limit_str, msg,
+            )
+            raise
+        raw = response.choices[0].message.content or ""
 
     # Strip markdown fences the LLM sometimes wraps around JSON
     cleaned = raw.strip()
@@ -178,11 +214,6 @@ def request_explanation(
     *source_files* maps relative file paths to their (post-fix) source
     code, giving the LLM context to explain the surrounding logic.
     """
-    if base_url:
-        client = OpenAI(base_url=base_url)
-    else:
-        client = OpenAI()
-
     diff_parts = []
     for d in applied_diffs:
         diff_parts.append(f"### {d['file']}\n```diff\n{d['diff']}\n```")
@@ -201,6 +232,15 @@ def request_explanation(
     user_msg = "\n\n".join(sections)
 
     log.info("Requesting fix explanation from %s", model)
+
+    if _use_gemini():
+        return _gemini_chat(EXPLAIN_SYSTEM_PROMPT, user_msg, model, temperature=0.3)
+
+    if base_url:
+        client = OpenAI(base_url=base_url)
+    else:
+        client = OpenAI()
+
     response = client.chat.completions.create(
         model=model,
         messages=[

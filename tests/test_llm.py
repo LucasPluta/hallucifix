@@ -20,8 +20,9 @@ def test_build_prompt_contains_sections():
     assert "Logs from api" in prompt
 
 
+@patch("hallucifix.llm._use_gemini", return_value=False)
 @patch("hallucifix.llm.OpenAI")
-def test_request_fix_parses_json(mock_openai_cls):
+def test_request_fix_parses_json(mock_openai_cls, _mock_gemini):
     mock_client = MagicMock()
     mock_openai_cls.return_value = mock_client
 
@@ -40,8 +41,9 @@ def test_request_fix_parses_json(mock_openai_cls):
     assert fix.iteration == 1
 
 
+@patch("hallucifix.llm._use_gemini", return_value=False)
 @patch("hallucifix.llm.OpenAI")
-def test_request_fix_handles_bad_json(mock_openai_cls):
+def test_request_fix_handles_bad_json(mock_openai_cls, _mock_gemini):
     mock_client = MagicMock()
     mock_openai_cls.return_value = mock_client
 

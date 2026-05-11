@@ -64,7 +64,8 @@ def test_orchestrator_fixes_bug(tmp_path):
     mock_client = MagicMock()
     mock_client.chat.completions.create.side_effect = [fix_response, explain_response]
 
-    with patch("hallucifix.llm.OpenAI", return_value=mock_client):
+    with patch("hallucifix.llm._use_gemini", return_value=False), \
+         patch("hallucifix.llm.OpenAI", return_value=mock_client):
         result = Orchestrator(config).run()
 
     assert result.success
