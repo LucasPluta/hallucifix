@@ -3,31 +3,30 @@
 #  strip_hints.sh – Remove bug-hinting comments from demo files
 #
 #  Usage:
-#    ./scripts/strip_hints.sh <file>
-#    ./scripts/strip_hints.sh demos/demo4/worker.py
+#    ./scripts/strip_hints.sh
 #
-#  Strips:
+#  Strips from all .py files under demos/:
 #    - Lines that are pure comments containing bug hint keywords
 #      (BUG, FIXME, HACK, ← BUG, should be, race, mismatch, etc.)
 #    - Inline trailing comments containing those keywords
 #    - The file-level docstring block marked with ⚠️
 #
-#  The script edits the file IN PLACE (overwrites the original).
+#  Files are edited IN PLACE.
 # ─────────────────────────────────────────────────────────────
 set -euo pipefail
 
-if [[ $# -ne 1 ]]; then
-    echo "Usage: $0 <file>" >&2
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+DEMOS_DIR="$PROJECT_ROOT/demos"
+
+FILES=$(find "$DEMOS_DIR" -name '*.py' -type f)
+
+if [[ -z "$FILES" ]]; then
+    echo "No Python files found in $DEMOS_DIR" >&2
     exit 1
 fi
 
-FILE="$1"
-if [[ ! -f "$FILE" ]]; then
-    echo "ERROR: $FILE not found." >&2
-    exit 1
-fi
-
-TMP=$(mktemp)
+for FILE in $FILES; do
 
 python3 -c "
 import re, sys
@@ -144,4 +143,7 @@ with open(sys.argv[1], 'w') as f:
     f.writelines(result)
 " "$FILE"
 
-echo "Stripped bug hints from $FILE"
+echo "  Stripped: $FILE"
+done
+
+echo "Done — processed $(echo "$FILES" | wc -l | tr -d ' ') files."
