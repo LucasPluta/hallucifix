@@ -15,6 +15,18 @@ def apply_patch(patch: dict, project_root: str = ".") -> str:
     """
     file_path = Path(project_root) / patch["file"]
     if not file_path.exists():
+        # The LLM sometimes returns a path that already includes the project_root
+        # prefix (e.g. "demos/demo4/worker.py" when project_root is "demos/demo4"),
+        # producing "demos/demo4/demos/demo4/worker.py". Strip the prefix and retry.
+        try:
+            rel = Path(patch["file"]).relative_to(Path(project_root))
+            alt = Path(project_root) / rel
+            if alt.exists():
+                file_path = alt
+                log.debug("Stripped redundant prefix: %s → %s", patch["file"], rel)
+        except ValueError:
+            pass
+    if not file_path.exists():
         raise FileNotFoundError(f"Patch target not found: {file_path}")
 
     original = file_path.read_text()
